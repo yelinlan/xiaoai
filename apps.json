@@ -1,0 +1,337 @@
+{
+  "QQ": {
+    "path": "D:\\myQQ\\Bin\\QQ.exe",
+    "process": "QQ.exe",
+    "aliases": [
+      "扣扣"
+    ],
+    "patterns": [
+      "q\\s?q",
+      "扣扣",
+      "企鹅"
+    ]
+  },
+  "谷歌浏览器": {
+    "path": "C:\\Users\\Administrator\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe",
+    "process": "chrome.exe",
+    "aliases": [
+      "浏览器",
+      "谷歌"
+    ],
+    "patterns": [
+      "谷歌(浏览器)?",
+      "chrome"
+    ]
+  },
+  "Edge浏览器": {
+    "path": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    "process": "msedge.exe",
+    "aliases": [
+      "微软浏览器"
+    ],
+    "patterns": [
+      "edge",
+      "微软(浏览器)?"
+    ]
+  },
+  "记事本": {
+    "path": "C:\\Windows\\System32\\notepad.exe",
+    "process": "notepad.exe",
+    "aliases": [
+      "notepad"
+    ],
+    "patterns": [
+      "记事本",
+      "notepad"
+    ]
+  },
+  "计算器": {
+    "path": "C:\\Windows\\System32\\calc.exe",
+    "process": "CalculatorApp.exe",
+    "aliases": [
+      "calc"
+    ],
+    "patterns": [
+      "计算器",
+      "calc(ulator)?"
+    ]
+  },
+  "Word": {
+    "path": "C:\\Program Files\\Microsoft Office\\Office16\\WINWORD.EXE",
+    "process": "WINWORD.EXE",
+    "aliases": [
+      "word文档"
+    ],
+    "patterns": [
+      "word(文档)?"
+    ]
+  },
+  "Excel": {
+    "path": "C:\\Program Files\\Microsoft Office\\Office16\\EXCEL.EXE",
+    "process": "EXCEL.EXE",
+    "aliases": [
+      "电子表格"
+    ],
+    "patterns": [
+      "excel(表格)?"
+    ]
+  },
+  "PPT": {
+    "path": "C:\\Program Files\\Microsoft Office\\Office16\\POWERPNT.EXE",
+    "process": "POWERPNT.EXE",
+    "aliases": [
+      "幻灯片",
+      "演示文稿"
+    ],
+    "patterns": [
+      "p\\s?p\\s?t",
+      "ppt(幻灯片)?"
+    ]
+  },
+  "Steam": {
+    "path": "C:\\Program Files (x86)\\Steam\\Steam.exe",
+    "process": "steam.exe",
+    "aliases": [
+      "蒸汽平台"
+    ],
+    "patterns": [
+      "steam"
+    ]
+  },
+  "VS Code": {
+    "path": "D:\\Microsoft VS Code\\Code.exe",
+    "process": "Code.exe",
+    "aliases": [
+      "vscode",
+      "代码编辑器"
+    ],
+    "patterns": [
+      "vs\\s?code"
+    ]
+  },
+  "PyCharm": {
+    "path": "D:\\PyCharm 2025.2.3\\bin\\pycharm64.exe",
+    "process": "pycharm64.exe",
+    "patterns": [
+      "py\\s?charm"
+    ]
+  },
+  "IDEA": {
+    "path": "C:\\Program Files\\JetBrains\\IntelliJ IDEA 2025.2\\bin\\idea64.exe",
+    "process": "idea64.exe",
+    "aliases": [
+      "intellij"
+    ],
+    "patterns": [
+      "intellij(\\s?idea)?",
+      "idea"
+    ]
+  },
+  "WebStorm": {
+    "path": "D:\\myWebstorm\\WebStorm 2024.1.2\\bin\\webstorm64.exe",
+    "process": "webstorm64.exe",
+    "patterns": [
+      "web\\s?storm"
+    ]
+  },
+  "CLion": {
+    "path": "F:\\CLion 2023.3.4\\bin\\clion64.exe",
+    "process": "clion64.exe",
+    "patterns": [
+      "c\\s?lion"
+    ]
+  },
+  "MATLAB": {
+    "path": "D:\\MyMatlab\\bin\\matlab.exe",
+    "process": "MATLAB.exe",
+    "aliases": [
+      "矩阵实验室"
+    ],
+    "patterns": [
+      "matlab"
+    ]
+  },
+  "Navicat": {
+    "path": "D:\\Navicat Premium 16\\navicat.exe",
+    "process": "navicat.exe",
+    "aliases": [
+      "数据库工具"
+    ],
+    "patterns": [
+      "navicat"
+    ]
+  },
+  "Typora": {
+    "path": "D:\\Typora\\Typora.exe",
+    "process": "Typora.exe",
+    "patterns": [
+      "typora"
+    ]
+  },
+  "Notepad++": {
+    "path": "F:\\myNotepad\\Notepad++\\notepad++.exe",
+    "process": "notepad++.exe",
+    "aliases": [
+      "notepad加加"
+    ],
+    "patterns": [
+      "notepad\\s?(\\+\\+|加加|pp)"
+    ]
+  },
+  "有道云笔记": {
+    "path": "D:\\MyYoudao\\ynote-desktop\\有道云笔记.exe",
+    "process": "有道云笔记.exe",
+    "aliases": [
+      "云笔记"
+    ],
+    "patterns": [
+      "有道(云)?笔记"
+    ]
+  },
+  "Xmind": {
+    "path": "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Xmind\\Xmind.exe",
+    "process": "Xmind.exe",
+    "aliases": [
+      "思维导图"
+    ],
+    "patterns": [
+      "xmind"
+    ]
+  },
+  "uTools": {
+    "path": "C:\\Users\\Administrator\\AppData\\Local\\Programs\\utools\\uTools.exe",
+    "process": "uTools.exe",
+    "patterns": [
+      "u\\s?tools"
+    ]
+  },
+  "Clash Verge": {
+    "path": "D:\\Clash Verge\\clash-verge.exe",
+    "process": "clash-verge.exe",
+    "aliases": [
+      "梯子",
+      "代理"
+    ],
+    "patterns": [
+      "clash(\\s?verge)?"
+    ]
+  },
+  "FinalShell": {
+    "path": "C:\\Users\\Administrator\\AppData\\Local\\finalshell\\finalshell.exe",
+    "process": "finalshell.exe",
+    "aliases": [
+      "ssh工具"
+    ],
+    "patterns": [
+      "final\\s?shell"
+    ]
+  },
+  "我的服务器": {
+    "cmd": "wt.exe ssh root@124.221.64.168",
+    "aliases": [
+      "服务器",
+      "腾讯云"
+    ],
+    "patterns": [
+      "(我的)?服务器",
+      "124\\.?221\\.?64\\.?168",
+      "腾讯云服务器"
+    ]
+  },
+  "Git Bash": {
+    "path": "D:\\Git\\git-bash.exe",
+    "process": "mintty.exe",
+    "patterns": [
+      "git\\s?bash"
+    ]
+  },
+  "原神": {
+    "cmd": "\"D:\\FufuLauncher\\FufuLauncher.exe\" --elevated-inject \"C:\\MiHoYo\\Genshin Impact Game\\YuanShen.exe\"",
+    "process": "YuanShen.exe",
+    "aliases": [
+      "米哈游启动器",
+      "启动原神"
+    ],
+    "patterns": [
+      "原神",
+      "米哈游(启动器)?",
+      "genshin"
+    ]
+  },
+  "_搜索": {
+    "name": "百度",
+    "url": "https://www.baidu.com/s?wd={}"
+  },
+  "_音箱": {
+    "user": "root",
+    "password": "yelinlan@123456"
+  },
+  "_听写": {
+    "enabled": false,
+    "engine": "local"
+  },
+  "哔哩哔哩": {
+    "url": "https://www.bilibili.com",
+    "aliases": [
+      "b站",
+      "小破站"
+    ],
+    "patterns": [
+      "哔[哩里丽]哔[哩里丽]",
+      "b\\s?站",
+      "bilibili"
+    ]
+  },
+  "GitHub": {
+    "url": "https://github.com",
+    "patterns": [
+      "git\\s?hub"
+    ]
+  },
+  "知乎": {
+    "url": "https://www.zhihu.com",
+    "patterns": [
+      "知乎"
+    ]
+  },
+  "微博": {
+    "url": "https://weibo.com",
+    "patterns": [
+      "微博"
+    ]
+  },
+  "百度": {
+    "url": "https://www.baidu.com",
+    "patterns": [
+      "百度"
+    ]
+  },
+  "淘宝": {
+    "url": "https://www.taobao.com",
+    "patterns": [
+      "淘宝"
+    ]
+  },
+  "京东": {
+    "url": "https://www.jd.com",
+    "patterns": [
+      "京东"
+    ]
+  },
+  "YouTube": {
+    "url": "https://www.youtube.com",
+    "aliases": [
+      "油管"
+    ],
+    "patterns": [
+      "youtube",
+      "油管"
+    ]
+  },
+  "Google": {
+    "url": "https://www.google.com",
+    "patterns": [
+      "google"
+    ]
+  }
+}

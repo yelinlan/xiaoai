@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+NUL
+*.log
+_ssh_err.log
+_t1.mp3
+_t3.wav
