@@ -40,6 +40,7 @@ SPEAKER_FILE = BASE_DIR / "speaker.json"   # 扫描发现的音箱 IP 记录
 HOST, PORT = "0.0.0.0", int(os.environ.get("GATEWAY_PORT", "4399"))
 DEDUP_WINDOW = 4.0     # 相同识别文本的去重窗口（秒）
 SUPPRESS_NATIVE = True  # 网关接管指令时，重启小爱语音服务掐断原生抢答（不需要时改为 False）
+SUPPRESS_SETTLE = 1.5   # 掐断后等待音频服务恢复的秒数（太短会导致紧随的 TTS 播不出来）
 
 # ---------------- 听写模式 ----------------
 DICTATION_TIMEOUT = 90      # 听写中连续这么久没说话自动结束（秒）
@@ -236,12 +237,13 @@ def close_app(conf):
         return False
     if not is_process_running(proc):
         return True  # 本来就没开，视为关闭成功（确认语会说"没在运行"）
-    # 先优雅关闭（发 WM_CLOSE），不行再强杀
     cf = subprocess.CREATE_NO_WINDOW
-    r = subprocess.run(["taskkill", "/IM", proc], capture_output=True, creationflags=cf)
-    if r.returncode != 0:
-        r = subprocess.run(["taskkill", "/F", "/IM", proc], capture_output=True, creationflags=cf)
-    return r.returncode == 0
+    # 先优雅关闭（发 WM_CLOSE）；QQ 这类应用会假死无视消息，必须复核后强杀
+    subprocess.run(["taskkill", "/IM", proc], capture_output=True, creationflags=cf)
+    if is_process_running(proc):
+        subprocess.run(["taskkill", "/F", "/IM", proc], capture_output=True, creationflags=cf)
+        time.sleep(0.5)
+    return not is_process_running(proc)
 
 
 # ---------------- 键盘注入（听写上屏） ----------------
@@ -630,7 +632,7 @@ async def handle_instruction(ws, data):
                     if content:
                         if SUPPRESS_NATIVE:
                             await suppress_native(ws)
-                            await asyncio.sleep(0.4)
+                            await asyncio.sleep(SUPPRESS_SETTLE)
                         await asyncio.to_thread(type_text_sendinput, content)
                         log.info("⌨️ 已输入到「%s」: %s", foreground_window_title(), content)
                 # 本地引擎：内容由录音流负责上屏，这里忽略（防止同一句输入两次）
@@ -642,7 +644,7 @@ async def handle_instruction(ws, data):
             typed = m.group("text").strip()
             if SUPPRESS_NATIVE:
                 await suppress_native(ws)
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(SUPPRESS_SETTLE)
             await asyncio.to_thread(type_text_sendinput, typed)
             log.info("⌨️ 已输入到「%s」: %s", foreground_window_title(), typed)
             continue  # 成功不播确认语，打出来的字就是反馈
@@ -651,7 +653,7 @@ async def handle_instruction(ws, data):
         if DICT_START_RE.fullmatch(clean):
             if SUPPRESS_NATIVE:
                 await suppress_native(ws)
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(SUPPRESS_SETTLE)
             await start_dictation(ws)
             continue
 
@@ -667,7 +669,7 @@ async def handle_instruction(ws, data):
         # 网关接管这条指令：掐断原生抢答，稍等再播确认语，避免两句话叠在一起
         if SUPPRESS_NATIVE:
             await suppress_native(ws)
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(SUPPRESS_SETTLE)
         app_key, conf = find_app(apps, app_name)
 
         if action == "search":
