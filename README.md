@@ -13,7 +13,7 @@
 ### 1. 环境要求
 
 - Windows + Python 3.10+（3.13 实测通过），安装依赖：`pip install websockets`
-- 一台已刷 [open-xiaoai](https://github.com/coderzc/open-xiaoai) 固件的小爱音箱，和电脑在**同一局域网**
+- 一台已刷 [open-xiaoai](https://github.com/idootop/open-xiaoai/blob/main/docs/flash.md) 固件的小爱音箱，和电脑在**同一局域网**
 - 防火墙放行 4399 端口（管理员运行）：
 
 ```bat
