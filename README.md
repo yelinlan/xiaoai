@@ -12,7 +12,7 @@
 
 ### 1. 环境要求
 
-- Windows + Python 3.10+（3.13 实测通过），安装依赖：`pip install websockets numpy`
+- Windows + Python 3.10+（3.13 实测通过），安装依赖：`pip install websockets`
 - 一台已刷 [open-xiaoai](https://github.com/coderzc/open-xiaoai) 固件的小爱音箱，和电脑在**同一局域网**
 - 防火墙放行 4399 端口（管理员运行）：
 
@@ -43,7 +43,7 @@ netsh advfirewall firewall add rule name="open-xiaoai-gateway" dir=in action=all
 schtasks /Create /TN "XiaoAI-Gateway" /SC ONLOGON /RL HIGHEST /F /TR "\"<pythonw.exe 完整路径>\" \"<项目目录>\app.py\""
 ```
 
-`pythonw.exe` 在 Python 安装目录下（无窗口运行）；`/RL HIGHEST` = 以最高权限启动，这样才能向管理员窗口打字。
+`pythonw.exe` 在 Python 安装目录下（无窗口运行）；`/RL HIGHEST` = 以最高权限启动（这样才能结束更高权限的进程）。
 
 ### 5. ⚠️ 安全提醒
 
@@ -68,39 +68,9 @@ schtasks /Create /TN "XiaoAI-Gateway" /SC ONLOGON /RL HIGHEST /F /TR "\"<pythonw
 
 匹配不到的应用会说「这个XX我还不会打开」。扫一遍电脑上装了什么可以跑 `scan_apps.ps1`。
 
-## 听写模式（语音打进输入框）
-
-**总开关**：`apps.json` 的 `_听写.enabled`（默认 **false 关闭**）。关闭时热键不注册、「开始听写」会被礼貌拒绝、本地模型永不加载（改 `enabled` 需重启网关）；「小爱同学，输入XXX」不受此开关影响，始终可用。
-
-**方式一：一句话直达（推荐）**——光标点在任意输入框，说：
-
-> 「小爱同学，**输入今天天气真好**」→ 输入框出现「今天天气真好」
-
-动词是「输入/打字」，成功时音箱不说话，字打出来就是反馈。
-
-**方式二：连续听写**——适合一次说多句（需先打开 `_听写.enabled`）：
-
-1. 「**小爱同学，开始听写**」（或按电脑热键 **Ctrl+Alt+X**）
-2. 每句话开头带「小爱同学」：比如「**小爱同学今天天气真好**」→ 直接上屏
-3. 「**小爱同学结束听写**」（或再按一次热键）退出；90 秒不说话自动退出
-
-**两种识别引擎**（`apps.json` 的 `_听写.engine` 可切换，只影响方式二）：
-- `"xiaoai"`：用小爱云端识别，最准，但每句要带「小爱同学」
-- `"local"`：本地离线识别（**SenseVoice 大模型 + 静音断句**，说话不上传小米），免唤醒词连续说，说完约 1 秒上屏、自动加标点；模型缺失时自动回落到流式小模型
-
-用 `local` 引擎需额外安装 `pip install sherpa-onnx keyboard`，并下载模型后用**环境变量**指定位置（代码里的默认值是作者机器路径，新机器必须覆盖）：
-
-| 环境变量 | 指向 |
-|---|---|
-| `SENSEVOICE_DIR` | `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17` 模型目录（需含 `model.int8.onnx` + `tokens.txt`） |
-| `SILERO_VAD` | `silero_vad.onnx` 文件完整路径 |
-| `SHERPA_MODEL_DIR` | （可选回落）`sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23` 模型目录 |
-
-SenseVoice / VAD 模型不全时自动回落到 `SHERPA_MODEL_DIR` 流式小模型；全都没有则本地听写不可用（`xiaoai` 引擎不受影响）。模型可从 [sherpa-onnx releases](https://github.com/k2-fsa/sherpa-onnx/releases) 下载。
-
 ## 网站与搜索
 
-- **打开我的服务器**：「打开我的服务器 / 打开服务器 / 打开腾讯云」→ Windows Terminal 直连 `ssh root@124.221.64.168`（SSH 公钥已装到服务器，免密登录）；也可以卖萌说「**喵喵打开**我的服务器」——「喵喵」是全指令通用的前缀词，喵喵打开QQ、喵喵搜原神、喵喵输入你好 都行
+- **打开我的服务器**：「打开我的服务器 / 打开服务器 / 打开腾讯云」→ Windows Terminal 直连 `ssh root@124.221.64.168`（SSH 公钥已装到服务器，免密登录）；也可以卖萌说「**喵喵打开**我的服务器」——「喵喵」是全指令通用的前缀词，喵喵打开QQ、喵喵搜原神 都行
 - **打开网站**：「打开哔哩哔哩 / B站 / GitHub / 知乎 / 微博 / 百度 / 淘宝 / 京东 / YouTube（油管）/ Google」，也支持「浏览器打开哔哩哔哩」语序
 - **语音搜索**：「浏览器搜原神」「搜原神」「搜一下原神」「百度一下XX」→ 默认浏览器打开百度搜索结果。想换搜索引擎改 `apps.json` 里的 `_搜索` 配置：
 
@@ -121,7 +91,7 @@ QQ、谷歌浏览器、Edge、记事本、计算器、Word、Excel、PPT、Steam
 | 文件 | 作用 |
 |---|---|
 | `app.py` | 网关全部逻辑（监听 4399 → 匹配指令 → 执行 → 音箱 TTS 确认） |
-| `apps.json` | 应用命令表 + `_音箱`/`_搜索`/`_听写` 配置（可自行扩展；含音箱密码，部署时必改） |
+| `apps.json` | 应用命令表 + `_音箱`/`_搜索` 配置（可自行扩展；含音箱密码，部署时必改） |
 | `xiaoai_askpass.bat` | 音箱 SSH 密码应答脚本（与 `_音箱.password` 保持一致；含明文密码） |
 | `scan_apps.ps1` | 扫描本机已安装的应用，辅助填写 `apps.json` 的路径 |
 | `selftest.py` | 本机自测：`python selftest.py 打开QQ`，不需要音箱 |
@@ -159,15 +129,13 @@ QQ、谷歌浏览器、Edge、记事本、计算器、Word、Excel、PPT、Steam
 
 > 新克隆的机器没有这个计划任务，按上文「新机器部署 · 4」自建。
 
-作者机器上网关通过计划任务 `XiaoAI-Gateway` 常驻：**登录 Windows 自动以管理员权限无窗口启动**（pythonw），内存常驻约 **38 MB**（听写关闭状态）。日志只写文件（`gateway.log` / `client_ssh.log`），没有黑窗口。
+作者机器上网关通过计划任务 `XiaoAI-Gateway` 常驻：**登录 Windows 自动以管理员权限无窗口启动**（pythonw），内存常驻约 **27 MB**。日志只写文件（`gateway.log` / `client_ssh.log`），没有黑窗口。
 
-- 听写结束后**自动释放模型内存**（模型只在听写期间加载，用完即还）
 - 关闭常驻：`schtasks /Delete /TN "XiaoAI-Gateway" /F`
 - 手动重启网关：`schtasks /End /TN "XiaoAI-Gateway" /F` 后再 `schtasks /Run /TN "XiaoAI-Gateway"`
 - 调试用 `start.bat` 前先停掉计划任务实例，否则端口冲突第二个起不来
 
 ## 已知限制
 
-- 听写打字只会进**当前焦点窗口**：说话前先点一下目标输入框；要打进管理员权限的窗口（如 ZCode），网关自己也得是管理员——`start.bat` 已自动提权（每次启动弹一次 UAC，点"是"）
 - 网关接管「打开/关闭XX」时会掐断原生小爱的抢答（重启其语音服务，官方同款中断方式），所以她的抢答只会漏出半句甚至听不到；非遥控指令完全不影响原生小爱
 - 电脑关机 / start.bat 没开时命令无效，音箱原生功能不受任何影响

@@ -266,10 +266,6 @@
     "user": "root",
     "password": "yelinlan@123456"
   },
-  "_听写": {
-    "enabled": false,
-    "engine": "local"
-  },
   "哔哩哔哩": {
     "url": "https://www.bilibili.com",
     "aliases": [

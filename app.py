@@ -13,7 +13,6 @@
   - client 断线后每秒自动重连，服务重启无需动音箱
 """
 import asyncio
-import ctypes
 import json
 import logging
 import os
@@ -25,11 +24,9 @@ import time
 import uuid
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor
-from ctypes import wintypes
 from pathlib import Path
 from urllib.parse import quote
 
-import numpy as np
 import websockets
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -42,25 +39,7 @@ DEDUP_WINDOW = 4.0     # 相同识别文本的去重窗口（秒）
 SUPPRESS_NATIVE = True  # 网关接管指令时，重启小爱语音服务掐断原生抢答（不需要时改为 False）
 SUPPRESS_SETTLE = 1.5   # 掐断后等待音频服务恢复的秒数（太短会导致紧随的 TTS 播不出来）
 
-# ---------------- 听写模式 ----------------
-DICTATION_TIMEOUT = 90      # 听写中连续这么久没说话自动结束（秒）
-DICTATION_HARD_LIMIT = 600  # 单次听写最长时长（秒）
-HOTKEY = "ctrl+alt+x"       # 电脑端切换听写的热键
-MODEL_DIR = Path(os.environ.get(
-    "SHERPA_MODEL_DIR",
-    r"C:\Users\Administrator\.zcode\models\sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23"))
-SENSEVOICE_DIR = Path(os.environ.get(
-    "SENSEVOICE_DIR",
-    r"C:\Users\Administrator\.zcode\models\sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"))
-VAD_PATH = Path(os.environ.get(
-    "SILERO_VAD", r"C:\Users\Administrator\.zcode\models\silero_vad.onnx"))
 WAKE_RE = re.compile(r"^(?:小爱同学|小爱小爱)[,，。]?\s*")
-DICT_START_RE = re.compile(r"^(?:帮我|请)?(?:开始|进入|打开)(?:一下)?听写(?:模式)?(?:吧|呗|呀|啊)?$")
-DICT_STOP_RE = re.compile(r"^(?:帮我|请)?(?:结束|停止|退出|关掉)(?:一下)?听写(?:模式)?(?:吧|呗|呀|啊)?$")
-# 一次性输入：「(小爱同学，)输入/打字 XXX」直接打进当前焦点输入框
-RE_TYPE = re.compile(
-    r"^(?:小爱同学|喵喵|帮我|请|麻烦)*[,，。]?\s*(?:输入|打字)(?:一下)?"
-    r"(?P<text>.+?)(?:吧|呗|呀|啊|哈|哦|啦)*[。，,！!？?~\s]*$")
 
 log = logging.getLogger("gateway")
 
@@ -246,351 +225,6 @@ def close_app(conf):
     return not is_process_running(proc)
 
 
-# ---------------- 键盘注入（听写上屏） ----------------
-_PUL = ctypes.POINTER(ctypes.c_ulong)
-
-
-class _MOUSEINPUT(ctypes.Structure):
-    _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
-                ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
-                ("time", wintypes.DWORD), ("dwExtraInfo", _PUL)]
-
-
-class _KEYBDINPUT(ctypes.Structure):
-    _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
-                ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
-                ("dwExtraInfo", _PUL)]
-
-
-class _HARDWAREINPUT(ctypes.Structure):
-    _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD),
-                ("wParamH", wintypes.WORD)]
-
-
-class _INPUTUNION(ctypes.Union):
-    _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT), ("hi", _HARDWAREINPUT)]
-
-
-class _INPUT(ctypes.Structure):
-    _anonymous_ = ("u",)
-    _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
-
-
-def foreground_window_title():
-    """当前焦点窗口标题（打字去向诊断用）"""
-    try:
-        import ctypes
-        hwnd = ctypes.windll.user32.GetForegroundWindow()
-        buf = ctypes.create_unicode_buffer(256)
-        ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
-        return buf.value.strip() or "未知窗口"
-    except Exception:
-        return "未知窗口"
-
-
-def type_text_sendinput(text):
-    """用 KEYEVENTF_UNICODE 把文字直接打进当前焦点输入框（绕过输入法，不动剪贴板）"""
-    KEYEVENTF_UNICODE, KEYEVENTF_KEYUP, INPUT_KEYBOARD = 0x0004, 0x0002, 1
-    codes = []
-    for ch in text:
-        b = ch.encode("utf-16-le")
-        for i in range(0, len(b), 2):
-            codes.append(b[i] | (b[i + 1] << 8))
-    inputs = []
-    for code in codes:
-        for flags in (KEYEVENTF_UNICODE, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP):
-            ki = _KEYBDINPUT(0, code, flags, 0, None)
-            inputs.append(_INPUT(INPUT_KEYBOARD, _INPUTUNION(ki=ki)))
-    if not inputs:
-        return
-    arr = (_INPUT * len(inputs))(*inputs)
-    user32 = ctypes.windll.user32
-    user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_INPUT), ctypes.c_int]
-    sent = user32.SendInput(len(inputs), arr, ctypes.sizeof(_INPUT))
-    if sent != len(inputs):
-        err = ctypes.GetLastError()
-        log.error("SendInput 只送达 %d/%d（GetLastError=%d，cbSize=%d）",
-                  sent, len(inputs), err, ctypes.sizeof(_INPUT))
-
-
-# ---------------- 听写模式 ----------------
-class Dictation:
-    """录音流 -> sherpa-onnx 流式识别 -> endpoint 断句 -> SendInput 上屏"""
-
-    def __init__(self):
-        self.active = False
-        self.engine = "xiaoai"        # xiaoai=小爱云端识别(每句带唤醒词) / local=本地模型(免唤醒词)
-        self.recording_started = False
-        self.asr_kind = "streaming"   # streaming=流式小模型 / sensevoice=VAD断句+整句识别(质量更好)
-        self.ready = False
-        self.rec = None               # 流式识别器
-        self.stream = None
-        self.off_rec = None           # SenseVoice 整句识别器
-        self.vad = None               # silero VAD
-        self.buf = bytearray()
-        self.worker = None
-        self.watchdog = None
-        self.started_at = 0.0
-        self.last_activity = 0.0
-        self.lock = asyncio.Lock()
-
-    def unload(self):
-        """释放本地模型内存（约几百MB）；下次听写自动重载，仅多等1-2秒"""
-        import gc
-        self.ready = False
-        self.rec = None
-        self.stream = None
-        self.off_rec = None
-        self.vad = None
-        self.asr_kind = "streaming"
-        gc.collect()
-        log.info("🧹 本地识别模型已卸载，内存已释放")
-
-    def ensure(self):
-        """惰性创建识别后端：优先 SenseVoice(质量好)，模型缺失则回落流式小模型"""
-        if self.ready:
-            return
-        import sherpa_onnx
-        if ((SENSEVOICE_DIR / "model.int8.onnx").exists()
-                and (SENSEVOICE_DIR / "tokens.txt").exists() and VAD_PATH.exists()):
-            self.off_rec = sherpa_onnx.OfflineRecognizer.from_sense_voice(
-                model=str(SENSEVOICE_DIR / "model.int8.onnx"),
-                tokens=str(SENSEVOICE_DIR / "tokens.txt"),
-                num_threads=2, use_itn=True)
-            cfg = sherpa_onnx.VadModelConfig()
-            cfg.silero_vad.model = str(VAD_PATH)
-            cfg.silero_vad.threshold = 0.5
-            cfg.silero_vad.min_speech_duration = 0.25
-            cfg.silero_vad.min_silence_duration = 0.5
-            cfg.sample_rate = 16000
-            self.vad = sherpa_onnx.VoiceActivityDetector(cfg, buffer_size_in_seconds=120)
-            self.asr_kind = "sensevoice"
-            log.info("📝 本地识别后端: SenseVoice + VAD")
-        elif (MODEL_DIR / "tokens.txt").exists():
-            self.rec = sherpa_onnx.OnlineRecognizer.from_transducer(
-                tokens=str(MODEL_DIR / "tokens.txt"),
-                encoder=str(MODEL_DIR / "encoder-epoch-99-avg-1.int8.onnx"),
-                decoder=str(MODEL_DIR / "decoder-epoch-99-avg-1.int8.onnx"),
-                joiner=str(MODEL_DIR / "joiner-epoch-99-avg-1.int8.onnx"),
-                num_threads=2, sample_rate=16000, feature_dim=80,
-                enable_endpoint_detection=True,
-                rule1_min_trailing_silence=2.0,
-                rule2_min_trailing_silence=1.0,
-                rule3_min_utterance_length=20,
-                decoding_method="greedy_search")
-            self.stream = self.rec.create_stream()
-            self.asr_kind = "streaming"
-            log.info("📝 本地识别后端: 流式 zipformer (%s)", MODEL_DIR.name)
-        else:
-            raise RuntimeError("未找到任何本地模型目录")
-        self.ready = True
-
-    def _decode_segment(self, samples):
-        """SenseVoice: 整句解码一段音频（VAD 给的是 float32，识别器要 int16）"""
-        samples = np.asarray(samples, dtype=np.int16)
-        stream = self.off_rec.create_stream()
-        stream.accept_waveform(16000, samples)
-        self.off_rec.decode_stream(stream)
-        return stream.result.text.strip()
-
-    def _feed(self, pcm):
-        """喂入一段 PCM，返回本次产生的定稿文本列表"""
-        samples = np.frombuffer(pcm, dtype=np.int16)
-        if samples.size == 0:
-            return []
-        if self.asr_kind == "sensevoice":
-            self.vad.accept_waveform(samples)  # int16 直喂（实测 float32 不会产出段落）
-            texts = []
-            while not self.vad.empty():
-                seg = self.vad.front
-                samples = np.asarray(seg.samples, dtype=np.int16).copy()  # pop 会令引用失效，先复制
-                self.vad.pop()
-                text = self._decode_segment(samples)
-                if text:
-                    texts.append(text)
-            return texts
-        # 流式小模型路径
-        self.stream.accept_waveform(16000, samples)
-        while self.rec.is_ready(self.stream):
-            self.rec.decode_stream(self.stream)
-        if self.rec.is_endpoint(self.stream):
-            text = self.rec.get_result(self.stream).strip()
-            self.rec.reset(self.stream)
-            return [text] if text else []
-        return []
-
-    def _flush(self):
-        try:
-            if self.asr_kind == "sensevoice":
-                texts = []
-                while not self.vad.empty():
-                    seg = self.vad.front
-                    samples = np.asarray(seg.samples, dtype=np.int16).copy()
-                    self.vad.pop()
-                    text = self._decode_segment(samples)
-                    if text:
-                        texts.append(text)
-                seg = self.vad.current_segment  # 收尾：进行中未定稿的段落（属性，非方法）
-                if seg is not None and len(np.asarray(seg.samples)):
-                    text = self._decode_segment(seg.samples)
-                    if text:
-                        texts.append(text)
-                return "".join(texts).strip()
-            self.stream.input_finished()
-            while self.rec.is_ready(self.stream):
-                self.rec.decode_stream(self.stream)
-            return self.rec.get_result(self.stream).strip()
-        except Exception as e:
-            log.error("听写收尾失败: %s", e)
-            return ""
-        finally:
-            if self.asr_kind == "streaming":
-                self.stream = self.rec.create_stream()  # 下次听写用新流
-
-    async def on_audio(self, frame):
-        """处理 client 发来的二进制帧（裸 Stream JSON: {id,tag,bytes:[...]}）"""
-        try:
-            obj = json.loads(frame)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return
-        if not isinstance(obj, dict) or obj.get("tag") != "record":
-            return
-        try:
-            self.buf.extend(bytes(bytearray(obj.get("bytes") or [])))
-        except (TypeError, ValueError):
-            return
-        self.last_activity = time.monotonic()
-
-    async def _worker(self, ws):
-        loop = asyncio.get_running_loop()
-        try:
-            while self.active:
-                if self.buf:
-                    chunk = bytes(self.buf)
-                    self.buf.clear()
-                    texts = await loop.run_in_executor(None, self._feed, chunk)
-                    for text in texts:
-                        await loop.run_in_executor(None, type_text_sendinput, text)
-                        log.info("⌨️ 已输入: %s", text)
-                await asyncio.sleep(0.1)
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            log.error("听写线程异常: %s", e)
-
-    async def _watchdog(self, ws):
-        try:
-            while True:
-                await asyncio.sleep(2)
-                now = time.monotonic()
-                if now - self.started_at > DICTATION_HARD_LIMIT:
-                    await stop_dictation(ws, "听写时间太长，自动结束")
-                    return
-                if now - self.last_activity > DICTATION_TIMEOUT:
-                    await stop_dictation(ws, "一段时间没说话，嘟~")
-                    return
-        except asyncio.CancelledError:
-            pass
-
-
-dictation = Dictation()
-current_ws = None  # 当前音箱连接，供热键线程使用
-
-
-async def start_dictation(ws):
-    async with dictation.lock:
-        if dictation.active:
-            await speak(ws, "已经在听写中了")
-            return
-        cfg = load_apps().get("_听写", {})
-        if not cfg.get("enabled", False):
-            await speak(ws, "听写功能未开启，需要在apps配置里打开")
-            return
-        engine = cfg.get("engine", "xiaoai")
-        if engine == "local":
-            try:
-                await asyncio.to_thread(dictation.ensure)
-            except Exception as e:
-                log.warning("本地听写不可用(%s)，改用小爱云端识别", e)
-                engine = "xiaoai"
-        dictation.engine = engine
-        dictation.recording_started = False
-        dictation.active = True
-        dictation.started_at = time.monotonic()
-        dictation.last_activity = time.monotonic()
-        dictation.watchdog = asyncio.create_task(dictation._watchdog(ws))
-
-    if engine == "local":
-        # 先播提示语、再开录音——顺序反了音箱自己的声音会被录进输入框
-        await speak(ws, "")
-        await asyncio.sleep(0.3)
-        try:
-            await ws.send(wrap_request("start_recording",
-                {"pcm": "noop", "channels": 1, "bits_per_sample": 16,
-                 "sample_rate": 16000, "period_size": 360, "buffer_size": 1440}))
-            dictation.recording_started = True
-            dictation.worker = asyncio.create_task(dictation._worker(ws))
-        except Exception as e:
-            log.error("start_recording 发送失败: %s", e)
-            await stop_dictation(ws, "录音启动失败，嘟~")
-            return
-        log.info("📝 听写开始 (engine=local)")
-    else:
-        await speak(ws, "好的，开始听写，每句话开头说小爱同学")
-        log.info("📝 听写开始 (engine=xiaoai)")
-
-
-async def stop_dictation(ws, reason="嘟~"):
-    async with dictation.lock:
-        if not dictation.active:
-            return
-        dictation.active = False
-        recording = dictation.recording_started
-        dictation.recording_started = False
-    for t in (dictation.worker, dictation.watchdog):
-        if t:
-            t.cancel()
-    dictation.worker = dictation.watchdog = None
-    if recording:
-        try:
-            await ws.send(wrap_request("stop_recording", None))
-        except Exception:
-            pass
-        rest = await asyncio.to_thread(dictation._flush)
-        if rest:
-            await asyncio.to_thread(type_text_sendinput, rest)
-            log.info("⌨️ 已输入(收尾): %s", rest)
-        await asyncio.to_thread(dictation.unload)  # 常驻友好：每次听写结束即释放模型内存
-    await speak(ws, reason)
-    log.info("📝 %s", reason)
-
-
-async def toggle_dictation():
-    if dictation.active:
-        await stop_dictation(current_ws)
-    else:
-        await start_dictation(current_ws)
-
-
-def setup_hotkey(loop):
-    """电脑端热键切换听写（可选；失败不影响语音控制）。听写开关关闭时不注册。"""
-    if not load_apps().get("_听写", {}).get("enabled", False):
-        log.info("⌨️ 听写功能已关闭（_听写.enabled=false），热键未注册")
-        return
-    try:
-        import keyboard
-
-        def _toggle():
-            if current_ws is None:
-                return
-            asyncio.run_coroutine_threadsafe(toggle_dictation(), loop)
-
-        keyboard.add_hotkey(HOTKEY, _toggle, suppress=False)
-        log.info("⌨️ 听写热键已注册: %s", HOTKEY)
-    except Exception as e:
-        log.warning("热键注册失败: %s（语音「开始听写」不受影响）", e)
-
-
 async def suppress_native(ws):
     """接管指令时重启小爱语音服务，掐断原生抢答。
     与官方 open-xiaoai speaker.rs 的 abort_xiaoai 同款命令，服务会自动拉起，
@@ -616,46 +250,6 @@ async def handle_instruction(ws, data):
     apps = load_apps()
     for text in texts:
         clean = WAKE_RE.sub("", text).strip()
-
-        # ---- 听写模式中的语音分流 ----
-        if dictation.active:
-            dictation.last_activity = time.monotonic()
-            if DICT_STOP_RE.fullmatch(clean) or DICT_STOP_RE.fullmatch(text.strip()):
-                await stop_dictation(ws)
-            elif DICT_START_RE.fullmatch(clean):
-                await speak(ws, "已经在听写中了")
-            else:
-                # 小爱引擎：每句话带唤醒词，云端识别后直接打进输入框（本地引擎走录音流）
-                if dictation.engine == "xiaoai" and clean:
-                    m = RE_TYPE.fullmatch(clean)  # 听写中说「输入XXX」只打内容
-                    content = m.group("text").strip() if m else clean
-                    if content:
-                        if SUPPRESS_NATIVE:
-                            await suppress_native(ws)
-                            await asyncio.sleep(SUPPRESS_SETTLE)
-                        await asyncio.to_thread(type_text_sendinput, content)
-                        log.info("⌨️ 已输入到「%s」: %s", foreground_window_title(), content)
-                # 本地引擎：内容由录音流负责上屏，这里忽略（防止同一句输入两次）
-            continue
-
-        # ---- 一次性输入：「输入XXX」直接打进焦点输入框（无需进入听写模式） ----
-        m = RE_TYPE.fullmatch(clean)
-        if m and m.group("text").strip():
-            typed = m.group("text").strip()
-            if SUPPRESS_NATIVE:
-                await suppress_native(ws)
-                await asyncio.sleep(SUPPRESS_SETTLE)
-            await asyncio.to_thread(type_text_sendinput, typed)
-            log.info("⌨️ 已输入到「%s」: %s", foreground_window_title(), typed)
-            continue  # 成功不播确认语，打出来的字就是反馈
-
-        # ---- 听写开关指令 ----
-        if DICT_START_RE.fullmatch(clean):
-            if SUPPRESS_NATIVE:
-                await suppress_native(ws)
-                await asyncio.sleep(SUPPRESS_SETTLE)
-            await start_dictation(ws)
-            continue
 
         key = text.lower().replace(" ", "")
         if any(s == key for (_, s) in recent_dispatched):
@@ -701,17 +295,13 @@ async def handle_instruction(ws, data):
 
 # ---------------- WebSocket 服务 ----------------
 async def handler(ws):
-    global current_ws
     peer = ws.remote_address
     log.info("✅ 音箱已连接: %s", peer)
     clients.add(ws)
-    current_ws = ws
     try:
         async for raw in ws:
             if isinstance(raw, bytes):
-                if dictation.active:
-                    await dictation.on_audio(raw)
-                continue  # 二进制帧：只有听写模式用（录音流）
+                continue  # 二进制帧：音频流，本版本用不到
             kind, body = unwrap(raw)
             if kind == "Event" and body.get("event") == "instruction":
                 log.info("📩 instruction: %s", json.dumps(body.get("data"), ensure_ascii=False)[:200])
@@ -935,7 +525,6 @@ async def main():
         handlers=handlers)
     log.info("🚀 小爱语音遥控网关启动 ws://%s:%d", local_ip(), PORT)
     log.info("等待音箱连接…（音箱侧需指向 ws://%s:4399）", local_ip())
-    setup_hotkey(asyncio.get_running_loop())
     asyncio.create_task(ensure_speaker())  # 后台自愈：发现音箱并校正指向
     async with websockets.serve(handler, HOST, PORT):
         await asyncio.Future()
