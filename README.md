@@ -8,6 +8,47 @@
 1. 双击 `start.bat`（保持窗口开着；关窗口 = 停止服务）
 2. 对音箱说命令即可
 
+## 新机器部署（克隆后必读）
+
+### 1. 环境要求
+
+- Windows + Python 3.10+（3.13 实测通过），安装依赖：`pip install websockets numpy`
+- 一台已刷 [open-xiaoai](https://github.com/coderzc/open-xiaoai) 固件的小爱音箱，和电脑在**同一局域网**
+- 防火墙放行 4399 端口（管理员运行）：
+
+```bat
+netsh advfirewall firewall add rule name="open-xiaoai-gateway" dir=in action=allow protocol=TCP localport=4399
+```
+
+- 端口默认 4399，可用环境变量 `GATEWAY_PORT` 修改
+
+### 2. 必改配置（仓库里全是作者机器的信息）
+
+| 文件 | 改什么 |
+|---|---|
+| `apps.json` 的 `_音箱` | `user` / `password`：你自己音箱的 SSH 账号密码（网关靠它登录音箱校正指向、重启 client） |
+| `xiaoai_askpass.bat` | 和上面同步成同一份音箱密码（文件内容就是一行 `@echo 你的密码`） |
+| `apps.json` 各应用的 `path` / `cmd` | 全是作者机器的安装路径；跑 `scan_apps.ps1` 扫自己的电脑照着改。不改的后果：对应「打开XX」失效，其余功能照常 |
+| `apps.json` 的 `我的服务器` 条目 | 作者的云服务器（含 IP）；换成自己的，或整条删掉 |
+
+### 3. 试运行
+
+双击 `start.bat`（或 `python app.py`）。首次启动会自动在局域网里扫描发现音箱、把它的指向改成本机 IP；`gateway.log` 出现「✅ 音箱已连接」即部署成功，可以直接对音箱说话测试。
+
+### 4. 开机自启（可选）
+
+计划任务 `XiaoAI-Gateway` 是作者本机的配置，**不随仓库分发**。需要的话管理员运行下面命令自建（两个 `<...>` 换成实际路径）：
+
+```bat
+schtasks /Create /TN "XiaoAI-Gateway" /SC ONLOGON /RL HIGHEST /F /TR "\"<pythonw.exe 完整路径>\" \"<项目目录>\app.py\""
+```
+
+`pythonw.exe` 在 Python 安装目录下（无窗口运行）；`/RL HIGHEST` = 以最高权限启动，这样才能向管理员窗口打字。
+
+### 5. ⚠️ 安全提醒
+
+`apps.json` 和 `xiaoai_askpass.bat` 里是**明文密码**。改完配置后不要 push 到任何公开仓库 / fork；仓库历史里遗留的作者密码请视为已泄露，不要复用，自己的音箱密码建议另换一套。
+
 ## 怎么加新应用 / 名字匹配规则
 
 编辑 `apps.json`，每个应用三个可选匹配字段（全部生效，命中任一即可）：
@@ -47,6 +88,16 @@
 - `"xiaoai"`：用小爱云端识别，最准，但每句要带「小爱同学」
 - `"local"`：本地离线识别（**SenseVoice 大模型 + 静音断句**，说话不上传小米），免唤醒词连续说，说完约 1 秒上屏、自动加标点；模型缺失时自动回落到流式小模型
 
+用 `local` 引擎需额外安装 `pip install sherpa-onnx keyboard`，并下载模型后用**环境变量**指定位置（代码里的默认值是作者机器路径，新机器必须覆盖）：
+
+| 环境变量 | 指向 |
+|---|---|
+| `SENSEVOICE_DIR` | `sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17` 模型目录（需含 `model.int8.onnx` + `tokens.txt`） |
+| `SILERO_VAD` | `silero_vad.onnx` 文件完整路径 |
+| `SHERPA_MODEL_DIR` | （可选回落）`sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23` 模型目录 |
+
+SenseVoice / VAD 模型不全时自动回落到 `SHERPA_MODEL_DIR` 流式小模型；全都没有则本地听写不可用（`xiaoai` 引擎不受影响）。模型可从 [sherpa-onnx releases](https://github.com/k2-fsa/sherpa-onnx/releases) 下载。
+
 ## 网站与搜索
 
 - **打开我的服务器**：「打开我的服务器 / 打开服务器 / 打开腾讯云」→ Windows Terminal 直连 `ssh root@124.221.64.168`（SSH 公钥已装到服务器，免密登录）；也可以卖萌说「**喵喵打开**我的服务器」——「喵喵」是全指令通用的前缀词，喵喵打开QQ、喵喵搜原神、喵喵输入你好 都行
@@ -70,10 +121,14 @@ QQ、谷歌浏览器、Edge、记事本、计算器、Word、Excel、PPT、Steam
 | 文件 | 作用 |
 |---|---|
 | `app.py` | 网关全部逻辑（监听 4399 → 匹配指令 → 执行 → 音箱 TTS 确认） |
-| `apps.json` | 应用命令表（可自行扩展） |
+| `apps.json` | 应用命令表 + `_音箱`/`_搜索`/`_听写` 配置（可自行扩展；含音箱密码，部署时必改） |
+| `xiaoai_askpass.bat` | 音箱 SSH 密码应答脚本（与 `_音箱.password` 保持一致；含明文密码） |
+| `scan_apps.ps1` | 扫描本机已安装的应用，辅助填写 `apps.json` 的路径 |
 | `selftest.py` | 本机自测：`python selftest.py 打开QQ`，不需要音箱 |
+| `speaker.json` | 音箱发现结果记录（运行时自动生成/更新，无需手改） |
 | `gateway.log` | 运行日志（排查问题时看这个） |
-| `start.bat` | 启动脚本 |
+| `client_ssh.log` | 音箱 client 的运行日志（由网关的常驻 SSH 会话保存） |
+| `start.bat` | 启动脚本（调试用，会自动请求管理员权限） |
 
 ## 音箱侧改动（仅 2 条，可一键还原）
 
@@ -100,9 +155,11 @@ QQ、谷歌浏览器、Edge、记事本、计算器、Word、Excel、PPT、Steam
 
 客户端由网关持有的 SSH 会话托管（音箱上没有 nohup/setsid 可用）：网关活着 client 就活着，网关退出后下次启动自动重新拉起。
 
-## 常驻运行（默认已配置）
+## 常驻运行（计划任务，仅作者本机已配置）
 
-网关通过计划任务 `XiaoAI-Gateway` 常驻：**登录 Windows 自动以管理员权限无窗口启动**（pythonw），内存常驻约 **38 MB**（听写关闭状态）。日志只写文件（`gateway.log` / `client_ssh.log`），没有黑窗口。
+> 新克隆的机器没有这个计划任务，按上文「新机器部署 · 4」自建。
+
+作者机器上网关通过计划任务 `XiaoAI-Gateway` 常驻：**登录 Windows 自动以管理员权限无窗口启动**（pythonw），内存常驻约 **38 MB**（听写关闭状态）。日志只写文件（`gateway.log` / `client_ssh.log`），没有黑窗口。
 
 - 听写结束后**自动释放模型内存**（模型只在听写期间加载，用完即还）
 - 关闭常驻：`schtasks /Delete /TN "XiaoAI-Gateway" /F`
