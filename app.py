@@ -38,6 +38,10 @@ HOST, PORT = "0.0.0.0", int(os.environ.get("GATEWAY_PORT", "4399"))
 DEDUP_WINDOW = 4.0     # 相同识别文本的去重窗口（秒）
 SUPPRESS_NATIVE = True  # 网关接管指令时，重启小爱语音服务掐断原生抢答（不需要时改为 False）
 SUPPRESS_SETTLE = 1.5   # 掐断后等待音频服务恢复的秒数（太短会导致紧随的 TTS 播不出来）
+RESCAN_INTERVAL = int(os.environ.get("GATEWAY_RESCAN", "300"))  # 音箱连着时的巡检间隔（秒）
+RESCAN_RETRY = 30       # 找不到音箱时的重试起步间隔，连续失败逐次翻倍到 RESCAN_INTERVAL
+SCAN_TIMEOUT = 2.0      # 扫 22 端口的单次超时（原来的 0.6s 对冷 ARP 太短，会漏掉在线音箱）
+IP_WAIT = 90.0          # 开机时等本机拿到有效局域网 IP 的最长秒数
 
 WAKE_RE = re.compile(r"^(?:小爱同学|小爱小爱)[,，。]?\s*")
 
@@ -45,6 +49,7 @@ log = logging.getLogger("gateway")
 
 clients = set()           # 当前连接的音箱 client
 recent_dispatched = []    # [(时间, 归一化文本)] 指令去重
+_rescan_soon = asyncio.Event()   # 音箱断开时置位，守护循环立刻复查而不是干等
 
 
 # ---------------- 协议封装 ----------------
@@ -201,7 +206,10 @@ def open_target(conf):
         webbrowser.open(conf["url"])
         return True
     if conf.get("cmd"):
-        subprocess.Popen(conf["cmd"], shell=True)
+        # 无窗口（pythonw）运行时，shell=True 会给 cmd.exe 新分配一个控制台窗口——黑窗一闪。
+        # CREATE_NO_WINDOW 只掐掉 cmd.exe 自己那个窗口，被它启动的 GUI 程序照常显示。
+        subprocess.Popen(conf["cmd"], shell=True,
+                         creationflags=subprocess.CREATE_NO_WINDOW)
         return True
     path = conf.get("path")
     if path and Path(path).exists():
@@ -320,17 +328,104 @@ async def handler(ws):
     finally:
         clients.discard(ws)
         log.info("❌ 音箱断开: %s", peer)
+        _rescan_soon.set()   # 立刻叫守护循环复查：音箱/电脑换了 IP 要尽快接回来
 
 
 def local_ip():
+    """本机在局域网里的 IP。拿不到有效地址时返回 ""——绝不返回 127.0.0.1，
+    否则开机网络还没就绪时会把 ws://127.0.0.1:4399 写进音箱，音箱就再也连不上了。"""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("223.5.5.5", 80))
-        return s.getsockname()[0]
+        ip = s.getsockname()[0]
     except Exception:
-        return "127.0.0.1"
+        ip = ""
     finally:
         s.close()
+    if not ip or ip.startswith(("127.", "169.254.", "0.")):
+        return ""
+    return ip
+
+
+def wait_for_lan_ip(timeout=None, interval=2.0):
+    """开机/唤醒时网络常比网关晚就绪，这里等到拿到有效局域网 IP 或超时（超时返回 ""）。"""
+    end = time.time() + (IP_WAIT if timeout is None else timeout)
+    while True:
+        ip = local_ip()
+        if ip or time.time() >= end:
+            return ip
+        time.sleep(interval)
+
+
+def arp_neighbors(base):
+    """只读地摸清本网段有哪些设备：先 ping 一遍 /24 预热 ARP 表，再读 arp -a，返回 [(ip, mac)]。
+    比只扫 TCP 端口可靠，而且能拿到 MAC——音箱换了 IP 也能靠 MAC 认出来。不改任何网络配置。"""
+    def ping(i):
+        try:
+            subprocess.run(["ping", "-n", "1", "-w", "600", "%s.%d" % (base, i)],
+                           capture_output=True, timeout=3,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+        except Exception:
+            pass
+
+    with ThreadPoolExecutor(max_workers=128) as ex:
+        list(ex.map(ping, range(1, 255)))
+
+    hosts = []
+    try:
+        out = subprocess.run(["arp", "-a"], capture_output=True, timeout=10,
+                             creationflags=subprocess.CREATE_NO_WINDOW,
+                             ).stdout.decode("gbk", errors="ignore")
+        for line in out.splitlines():
+            parts = line.split()
+            # 中文 Windows 的类型列是「动态/静态」而不是 dynamic，所以只按前两列的形状判断
+            if len(parts) >= 2 and parts[0].startswith(base + ".") and "-" in parts[1]:
+                mac = parts[1].replace("-", ":").lower()
+                if mac == "ff:ff:ff:ff:ff:ff" or parts[0].endswith(".255"):
+                    continue          # 广播地址不是设备，跳过
+                hosts.append((parts[0], mac))
+    except Exception:
+        pass
+    return hosts
+
+
+def mac_of(ip):
+    """从 ARP 表查某个 IP 的 MAC（查不到返回 None）。"""
+    try:
+        out = subprocess.run(["arp", "-a", ip], capture_output=True, timeout=10,
+                             creationflags=subprocess.CREATE_NO_WINDOW,
+                             ).stdout.decode("gbk", errors="ignore")
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == ip and "-" in parts[1]:
+                return parts[1].replace("-", ":").lower()
+    except Exception:
+        pass
+    return None
+
+
+def dropbear_hosts(addrs):
+    """并发试 22 端口，返回 banner 是 dropbear 的地址（open-xiaoai 固件用的就是 dropbear）。"""
+    def probe(addr):
+        try:
+            s = socket.create_connection((addr, 22), timeout=SCAN_TIMEOUT)
+            s.settimeout(SCAN_TIMEOUT)
+            banner = s.recv(64).decode(errors="ignore")
+            s.close()
+            if banner.startswith("SSH-2.0-dropbear"):
+                return addr
+        except OSError:
+            pass
+        return None
+
+    found = []
+    if not addrs:
+        return found
+    with ThreadPoolExecutor(max_workers=64) as ex:
+        for r in ex.map(probe, list(addrs)):
+            if r:
+                found.append(r)
+    return found
 
 
 # ---------------- 音箱自动发现与指向自愈 ----------------
@@ -374,13 +469,13 @@ _client_ssh = None  # 持有 client 的长连 SSH 会话（client 是其前台�
 
 
 def speaker_connected():
-    """本机 4399 上有没有来自局域网的 ESTABLISHED 连接（即音箱 client 已连上）"""
+    """本机网关端口上有没有来自局域网的 ESTABLISHED 连接（即音箱 client 已连上）"""
     try:
         out = subprocess.run(["netstat", "-ano"], capture_output=True,
                              creationflags=subprocess.CREATE_NO_WINDOW,
                              timeout=10).stdout.decode("gbk", errors="ignore")
         for line in out.splitlines():
-            if ":4399" in line and "ESTABLISHED" in line:
+            if ":%d" % PORT in line and "ESTABLISHED" in line:
                 return True
     except Exception:
         pass
@@ -419,74 +514,102 @@ def start_client_via_ssh(ip, user, password, server_addr):
         errfile.close()
 
 
-def scan_speaker(user, password):
-    """扫描本机 /24 网段：开 22 端口且 SSH banner 为 dropbear 的设备挨个验证，
-    能读到 /data/open-xiaoai/server.txt 的就是小爱音箱。"""
-    base = ".".join(local_ip().split(".")[:3])
+def scan_speaker(user, password, known_mac=None):
+    """在本网段找小爱音箱，返回 (ip, mac)；找不到返回 (None, None)。
 
-    def probe(addr):
-        try:
-            s = socket.create_connection((addr, 22), timeout=0.6)
-            banner = s.recv(64).decode(errors="ignore")
-            s.close()
-            if banner.startswith("SSH-2.0-dropbear"):
-                return addr
-        except OSError:
-            pass
-        return None
-
-    candidates = []
-    with ThreadPoolExecutor(max_workers=64) as ex:
-        for r in ex.map(probe, ["%s.%d" % (base, i) for i in range(1, 255)]):
-            if r:
-                candidates.append(r)
-    log.info("🔎 网段扫描完成，dropbear 设备: %s", candidates or "无")
-    for addr in candidates:
-        ok, out = ssh_speaker(addr, user, password,
-                              "test -f /data/open-xiaoai/server.txt && echo IS_XIAOAI")
-        if ok and "IS_XIAOAI" in out:
-            return addr
-    return None
-
-
-async def ensure_speaker():
-    """网关启动时的自愈：确认音箱可达且指向本机最新 IP，变了就 SSH 改写并重启其 client。"""
-    meta = load_apps().get("_音箱", {})
-    user = meta.get("user", "root")
-    password = meta.get("password", "open-xiaoai")
+    候选顺序：
+      ① speaker.json 里记录的 MAC 在 ARP 表里对应的 IP —— 音箱换了 IP 也能认出来；
+      ② ARP 邻居里开着 dropbear 的；
+      ③ 全网段 22 端口补扫 —— 有些设备不回 ICMP，ARP 表里根本看不到。
+    每个候选都用 SSH 验证 /data/open-xiaoai/server.txt 是否存在。
+    """
     my_ip = local_ip()
-    want = "ws://%s:4399" % my_ip
-
-    rec = load_speaker_record()
-    ip = rec.get("ip")
-    log.info("🔎 检查音箱（记录IP: %s | 本机IP: %s）", ip or "无", my_ip)
+    if not my_ip:
+        log.warning("⚠️ 本机还没有有效的局域网 IP，跳过音箱扫描")
+        return None, None
+    base = ".".join(my_ip.split(".")[:3])
+    neighbors = arp_neighbors(base)
+    ip2mac = dict(neighbors)
+    log.info("🔎 网段 %s.0/24 的 ARP 邻居 %d 台: %s", base, len(neighbors),
+             ", ".join(ip2mac) or "无")
 
     def is_speaker(addr):
         ok, out = ssh_speaker(addr, user, password,
                               "test -f /data/open-xiaoai/server.txt && echo IS_XIAOAI")
         return ok and "IS_XIAOAI" in out
 
-    if not (ip and await asyncio.to_thread(is_speaker, ip)):
-        ip = await asyncio.to_thread(scan_speaker, user, password)
-        if not ip:
-            log.warning("⚠️ 未找到小爱音箱（音箱没开/不同网段/密码不对），原生功能不受影响")
-            return
-        log.info("✅ 扫描发现小爱音箱: %s", ip)
-    else:
+    if known_mac:
+        want_mac = known_mac.lower()
+        for addr, mac in neighbors:
+            if mac != want_mac:
+                continue
+            log.info("🔎 按记录的 MAC %s 找到候选 IP: %s", want_mac, addr)
+            if is_speaker(addr):
+                return addr, mac
+
+    candidates = dropbear_hosts(ip2mac)
+    rest = ["%s.%d" % (base, i) for i in range(1, 255) if "%s.%d" % (base, i) not in ip2mac]
+    for addr in dropbear_hosts(rest):
+        if addr not in candidates:
+            candidates.append(addr)
+    log.info("🔎 网段扫描完成，dropbear 设备: %s", candidates or "无")
+
+    for addr in candidates:
+        if is_speaker(addr):
+            return addr, ip2mac.get(addr) or mac_of(addr)
+    return None, None
+
+
+async def ensure_speaker():
+    """自愈一轮：等本机拿到有效 IP → 找到音箱 → 把音箱 server.txt 指向本机 →
+    client 没连上就通过 SSH 重启它。返回 True 表示这轮确认音箱已连着本机。"""
+    meta = load_apps().get("_音箱", {})
+    user = meta.get("user", "root")
+    password = meta.get("password", "open-xiaoai")
+
+    my_ip = await asyncio.to_thread(wait_for_lan_ip)
+    if not my_ip:
+        log.error("❌ %.0f 秒内没拿到有效局域网 IP（网卡没连上/没获取到 DHCP），本轮跳过自愈", IP_WAIT)
+        return False
+    want = "ws://%s:%d" % (my_ip, PORT)
+
+    rec = load_speaker_record()
+    ip, mac = rec.get("ip"), rec.get("mac")
+    log.info("🔎 检查音箱（记录IP: %s | 记录MAC: %s | 本机IP: %s）", ip or "无", mac or "无", my_ip)
+
+    def is_speaker(addr):
+        ok, out = ssh_speaker(addr, user, password,
+                              "test -f /data/open-xiaoai/server.txt && echo IS_XIAOAI")
+        return ok and "IS_XIAOAI" in out
+
+    if ip and await asyncio.to_thread(is_speaker, ip):
         log.info("✅ 记录的音箱可达: %s", ip)
+        if not mac:
+            mac = await asyncio.to_thread(mac_of, ip)
+    else:
+        if ip:
+            log.info("🔎 记录的 IP %s 不可达（音箱可能换了 IP），重新发现…", ip)
+        ip, new_mac = await asyncio.to_thread(scan_speaker, user, password, mac)
+        if new_mac:
+            mac = new_mac
+        if not ip:
+            log.warning("⚠️ 未找到小爱音箱（没通电/没连上 WiFi/不在本网段/密码不对），原生功能不受影响")
+            return False
+        log.info("✅ 发现小爱音箱: %s%s", ip, "（MAC %s）" % mac if mac else "")
 
     ok, cur = await asyncio.to_thread(ssh_speaker, ip, user, password,
                                       "cat /data/open-xiaoai/server.txt")
     if ok and cur.strip() == want:
         log.info("✅ 音箱指向已是本机（%s），无需修改", want)
     else:
-        log.info("🔧 音箱指向（%s）过期，改为 %s", cur.strip() or "读取失败", want)
+        log.info("🔧 音箱指向（%s）过期，改为 %s",
+                 (cur.strip() if ok else "读取失败") or "空", want)
         ok, _ = await asyncio.to_thread(
             ssh_speaker, ip, user, password,
             "echo '%s' > /data/open-xiaoai/server.txt" % want)
         if not ok:
             log.error("🔧 server.txt 写入失败")
-            return
+            return False
 
     # client 没连上来时通过长连 SSH 会话重启它（client 作为会话前台进程，
     # 由网关持有会话；音箱上没有 nohup/setsid，无法脱离会话后台运行）
@@ -500,11 +623,37 @@ async def ensure_speaker():
 
     try:
         SPEAKER_FILE.write_text(json.dumps(
-            {"ip": ip, "last_seen": time.strftime("%Y-%m-%d %H:%M:%S")},
+            {"ip": ip, "mac": mac, "last_seen": time.strftime("%Y-%m-%d %H:%M:%S")},
             ensure_ascii=False), encoding="utf-8")
         log.info("💾 音箱信息已记录到 %s", SPEAKER_FILE.name)
     except Exception as e:
         log.warning("记录音箱信息失败: %s", e)
+    return speaker_connected()
+
+
+async def speaker_keeper():
+    """后台守护循环。只在启动时自愈一次是不够的：运行中音箱换 IP、电脑换 IP
+    （DHCP 重租/换网卡/断网重连）、音箱断电重启，都需要重新发现并把音箱指回来。"""
+    fails = 0
+    while True:
+        try:
+            ok = await ensure_speaker()
+        except Exception as e:
+            log.error("音箱自愈出错: %s", e)
+            ok = False
+        if ok:
+            fails = 0
+            wait = RESCAN_INTERVAL
+        else:
+            fails += 1
+            wait = min(RESCAN_RETRY * (2 ** min(fails - 1, 4)), RESCAN_INTERVAL)
+            wait = max(wait, RESCAN_RETRY)
+        _rescan_soon.clear()
+        try:
+            await asyncio.wait_for(_rescan_soon.wait(), timeout=wait)
+            log.info("🔁 音箱连接状态变化，立即复查")
+        except asyncio.TimeoutError:
+            pass
 
 
 async def main():
@@ -523,9 +672,9 @@ async def main():
         format="%(asctime)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
         handlers=handlers)
-    log.info("🚀 小爱语音遥控网关启动 ws://%s:%d", local_ip(), PORT)
-    log.info("等待音箱连接…（音箱侧需指向 ws://%s:4399）", local_ip())
-    asyncio.create_task(ensure_speaker())  # 后台自愈：发现音箱并校正指向
+    log.info("🚀 小爱语音遥控网关启动 ws://%s:%d", local_ip() or "本机IP待定", PORT)
+    log.info("等待音箱连接…（音箱侧需指向 ws://%s:%d）", local_ip() or "本机IP", PORT)
+    asyncio.create_task(speaker_keeper())  # 后台守护：发现音箱、校正指向、断开后自动重接
     async with websockets.serve(handler, HOST, PORT):
         await asyncio.Future()
 

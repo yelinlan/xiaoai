@@ -121,18 +121,46 @@ powershell -ExecutionPolicy Bypass -File scan_apps.ps1
 
 ### 第 8 步（可选）：开机自启、无窗口常驻
 
-**管理员身份**运行下面的命令建计划任务（两个 `<...>` 换成实际路径；`pythonw.exe` 在 Python 安装目录下，是无窗口版的 python）：
+用 `pythonw.exe`（Python 安装目录下的无窗口版解释器）建一个「登录时启动」的计划任务。**管理员身份**的 PowerShell 里跑：
+
+```powershell
+$pythonw  = "C:\Users\Administrator\AppData\Local\Programs\Python\Python313\pythonw.exe"  # 换成你的 pythonw.exe
+$proj     = "D:\soft\xiaoai-gateway"
+$taskName = "XiaoAI-Gateway"
+$user     = "$env:USERDOMAIN\$env:USERNAME"
+
+Register-ScheduledTask -TaskName $taskName -Force `
+  -Action (New-ScheduledTaskAction -Execute $pythonw -Argument "`"$proj\app.py`"" -WorkingDirectory $proj) `
+  -Trigger (New-ScheduledTaskTrigger -AtLogOn -User $user) `
+  -Principal (New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest) `
+  -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
+               -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 1) `
+               -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+               -StartWhenAvailable -MultipleInstances IgnoreNew) `
+  -Description "小爱语音遥控网关：登录时无窗口常驻"
+```
+
+图省事的话 `schtasks` 一行也能建，但拿不到下面那些「不限运行时长 / 崩了自动重启」的设置：
 
 ```bat
 schtasks /Create /TN "XiaoAI-Gateway" /SC ONLOGON /RL HIGHEST /F /TR "\"<pythonw.exe 完整路径>\" \"<项目目录>\app.py\""
 ```
 
-之后登录 Windows 就自动启动：内存常驻约 27 MB，日志只写文件，没有黑窗口。备注：
+之后登录 Windows 就自动启动：内存常驻约 27 MB，日志只写 `gateway.log`，没有黑窗口。上面几个参数为什么必须这么填：
 
-- 建了计划任务后，调试用 `start.bat` 前先停掉它，否则端口冲突第二个起不来：`schtasks /End /TN "XiaoAI-Gateway" /F`
-- 手动重启网关：先 `/End` 再 `schtasks /Run /TN "XiaoAI-Gateway"`
-- 取消自启：`schtasks /Delete /TN "XiaoAI-Gateway" /F`
-- `/RL HIGHEST` = 以最高权限启动，这样才能结束更高权限的进程
+- `-ExecutionTimeLimit (New-TimeSpan -Seconds 0)` = **不限运行时长**。计划任务默认 72 小时后强制结束，常驻服务必须关掉这个限制
+- `-RestartCount 5` + `-RestartInterval 1 分钟` = 进程异常退出后自动拉起
+- `-RunLevel Highest` = 以最高权限启动，这样才能结束更高权限的进程（`apps.json` 里的 `process`）
+- `-LogonType Interactive` = 只在本人登录时跑，且配合 `Highest` **不弹 UAC** 就能静默提权
+- `-MultipleInstances IgnoreNew` = 已经在跑就别再起第二个，避免抢同一个端口
+
+日常操作：
+
+- 手动重启：`Stop-ScheduledTask -TaskName "XiaoAI-Gateway"; Start-ScheduledTask -TaskName "XiaoAI-Gateway"`
+- 调试用 `start.bat` 前先停掉计划任务，否则端口冲突第二个起不来：`Stop-ScheduledTask -TaskName "XiaoAI-Gateway"`
+- 查是否在跑：`Get-ScheduledTaskInfo -TaskName "XiaoAI-Gateway"`（`LastTaskResult` 为 `267009` 就是「正在运行」），或 `Get-Process pythonw`
+- 取消自启：`Unregister-ScheduledTask -TaskName "XiaoAI-Gateway" -Confirm:$false`
+- `schtasks` 版对应命令：`/End`、`/Run`、`/Delete /F`
 
 ### ⚠️ 安全提醒
 
@@ -190,21 +218,30 @@ QQ、谷歌浏览器、Edge、记事本、计算器、Word、Excel、PPT、Steam
 | `xiaoai_askpass.bat` | 音箱 SSH 密码应答脚本（与 `_音箱.password` 保持一致；含明文密码） |
 | `scan_apps.ps1` | 扫描本机已安装的应用，辅助填写 `apps.json` 的路径 |
 | `selftest.py` | 本机自测：`python selftest.py 打开QQ`，不需要音箱 |
-| `speaker.json` | 音箱发现结果记录（运行时自动生成/更新，无需手改） |
+| `find_speaker.py` | 找音箱排查工具：`python find_speaker.py --ssh`，只读扫本网段，列出所有设备和候选音箱 |
+| `speaker.json` | 音箱发现结果记录（IP + MAC，运行时自动生成/更新，无需手改） |
 | `gateway.log` | 运行日志（排查问题时看这个） |
 | `client_ssh.log` | 音箱 client 的运行日志（由网关的常驻 SSH 会话保存） |
 | `start.bat` | 启动脚本（会自动请求管理员权限；调试用，常驻请用第 8 步的计划任务） |
 
 ## IP 变化自愈（无需手动配置）
 
-网关每次启动会自动完成"音箱发现 + 指向校正"：
+网关有一个**后台守护循环**：启动时自愈一轮，之后每 5 分钟巡检一次（`GATEWAY_RESCAN` 环境变量可改），
+音箱一断开就立刻复查。每一轮做的事：
 
-1. 读取 `speaker.json` 里记录的音箱 IP，SSH 验证可达性（账号密码来自 `apps.json` 的 `_音箱` 配置）
-2. 记录的 IP 失效时，**自动扫描本机所在网段**：找开 22 端口、dropbear 特征的设备挨个验证，能读到 `/data/open-xiaoai/server.txt` 的就是小爱音箱
-3. 对比音箱的指向与本机当前 IP，过期就改写其 `server.txt` 并通过常驻 SSH 会话重启它的 client
-4. 发现结果记录到 `speaker.json`，`client_ssh.log` 保存音箱 client 的运行日志
+1. 等本机拿到有效的局域网 IP（最长 90 秒）。**拿不到就跳过本轮**，绝不会把 `ws://127.0.0.1:4399` 写进音箱
+2. 按 `speaker.json` 里记录的 IP 做 SSH 验证（账号密码来自 `apps.json` 的 `_音箱` 配置）
+3. 记录的 IP 失效时**重新发现音箱**：先 ping 一遍 /24 预热 ARP 表，
+   ① 按记录的 **MAC** 认领（音箱换了 IP 也认得出来）② 找 ARP 邻居里开着 22 端口、
+   banner 是 dropbear 的 ③ 再全网段补扫一遍（有些设备不回 ICMP，ARP 表里看不到），
+   逐个 SSH 验证能读到 `/data/open-xiaoai/server.txt` 的才是小爱音箱
+4. 对比音箱的指向与本机当前 IP，过期就改写其 `server.txt` 并通过常驻 SSH 会话重启它的 client
+5. 把发现的 IP + MAC 写回 `speaker.json`，`client_ssh.log` 保存音箱 client 的运行日志
 
 客户端由网关持有的 SSH 会话托管（音箱上没有 nohup/setsid 可用）：网关活着 client 就活着，网关退出后下次启动自动重新拉起。建议在路由器给电脑和音箱做 DHCP 保留，IP 固定更稳。
+
+整个过程**只读网络状态、不修改任何网络配置**。找不到音箱时跑 `python find_speaker.py --ssh`，
+它会告诉你本网段到底有哪些设备、音箱在不在里面、指向对不对。
 
 ## 音箱侧还原
 
@@ -217,6 +254,8 @@ QQ、谷歌浏览器、Edge、记事本、计算器、Word、Excel、PPT、Steam
 
 - **start.bat 窗口一闪就没了**：Python 没装好或没勾 PATH。cmd 里跑 `python --version` 验证，报错就重装 Python
 - **音箱没反应**：先看 `gateway.log` 有没有「✅ 音箱已连接」。没有 → 检查 ① 网关是否在跑 ② 电脑防火墙是否放行 4399（第 5 步）③ 音箱上第 2 步的 client 是否装过 ④ `_音箱` 密码是否和音箱实际密码一致（密码错会发现不了音箱）
+- **日志刷「⚠️ 未找到小爱音箱」**：说明本网段里根本没有开着 dropbear 的设备，跑 `python find_speaker.py --ssh` 看清单。按顺序查 ① 音箱通电没有（指示灯橙色闪烁＝没连上 WiFi）② 音箱连的是不是和电脑同一个 WiFi（`find_speaker.py` 会打印电脑所在的 SSID）③ 路由器有没有被重置/换过 ④ 音箱是不是重新刷过机（MAC 变了要重新配网）
+- **日志刷「❌ 90 秒内没拿到有效局域网 IP」**：电脑自己没连上网（Wi-Fi 没连/DHCP 没拿到地址）。守护循环会每 30 秒起继续重试，网络恢复后自动接上，不用重启网关
 - **日志有「🎤 识别到」但没执行**：对照 `apps.json` 的名称、别名、路径；路径不对时「打开」会失败并播报
 - **只有原生小爱在答**：指令没匹配上网关，同样看 🎤 日志里识别出的原文
 - **想不通就跑自测**：`python selftest.py 打开QQ` 不需要音箱，能验证电脑侧整条链路
